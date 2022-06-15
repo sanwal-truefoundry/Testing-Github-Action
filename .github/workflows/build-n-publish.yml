@@ -1,0 +1,74 @@
+name: Build Servicefoundry-Server
+
+on:
+  push:
+    branches:
+      - main
+      - release
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITHUB_SHA: ${{ github.sha }}
+
+jobs:
+  build_container:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Set repository name
+        run: |
+          echo "REPOSITORY_NAME=$(echo "$GITHUB_REPOSITORY" | awk -F / '{print $2}' | sed -e "s/:refs//")" >> $GITHUB_ENV
+
+      - name: Set docker repo name
+        run: |
+          echo "repository name is $REPOSITORY_NAME"
+          echo "DOCKER_REPO=truefoundrycloud/$REPOSITORY_NAME" >> $GITHUB_ENV
+
+      - name: Docker login
+        run: |
+          docker login -u truefoundry -p "${{ secrets.DOCKERHUB_TOKEN }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Build and push container
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          push: true
+          tags: ${{ env.DOCKER_REPO }}:${{ env.GITHUB_SHA }}
+          cache-from: type=registry,ref=${{ env.DOCKER_REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.DOCKER_REPO }}:buildcache,mode=max
+
+      - name: Checkout helm-charts
+        uses: actions/checkout@v2
+        with:
+          repository: truefoundry/helm-charts
+          ref: 'main'
+          token: ${{ secrets.TF_GITHUB_CI_ADMIN_TOKEN }}
+          path: tmp_ahc
+
+      - uses: actions/setup-node@v2
+        with:
+          node-version: '14'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Update values.yaml file
+        run: |
+          npm install dotenv
+          npm install js-yaml
+          node ./.github/scripts/update-values.mjs .env.default tmp_ahc/charts/${{ env.REPOSITORY_NAME }}/values.yaml '${{ github.sha }}'
+
+      - name: Commit updated Chart
+        run: |
+          cd tmp_ahc
+          git config user.name github-action
+          git add charts/${{ env.REPOSITORY_NAME }}/values.yaml
+          git commit -m "[CI] Update values.yaml for ${{ env.REPOSITORY_NAME }}"
+          git push
